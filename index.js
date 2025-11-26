@@ -1,0 +1,309 @@
+// ---------------------------
+// ONE FILE BACKEND SYSTEM
+// Node + Express + MongoDB + JWT + Admin
+// ---------------------------
+
+require("dotenv").config();
+const express = require("express");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
+const nodemailer = require("nodemailer");
+const cors = require("cors");
+const sendOtpEmail = require("./sendOtp.js");
+
+
+
+
+
+const app = express();
+app.use(cookieParser());
+app.use(express.json());
+app.use(cors());
+
+// ---------------------------
+// MONGODB CONNECT
+// ---------------------------
+mongoose
+    .connect(process.env.DB_URL)
+    .then(() => console.log("DB Connected"))
+    .catch((err) => console.log("DB Error", err));
+
+
+// ---------------------------
+// USER MODEL
+// ---------------------------
+const UserSchema = new mongoose.Schema({
+    name: String,
+    email: String,
+    password: String,
+    role: { type: String, default: "user" },
+    otp: { type: String, default: null },
+    otpExpiresAt: { type: Date, default: null },
+    isVerified: { type: Boolean, default: false }
+
+
+});
+
+const User = mongoose.model("User", UserSchema);
+
+// ---------------------------
+// TRANSACTION MODEL
+// ---------------------------
+const TxSchema = new mongoose.Schema({
+    amount: {
+        type: Number,
+        required: true
+    },
+    date: {
+        type: Date,
+        default: Date.now   // auto today date
+    },
+
+    year: {
+        type: Number,
+        default: () => new Date().getFullYear()  // auto year
+    },
+    sender: {
+        type: String,
+        required: true
+    },
+
+    receiver: {
+        type: String,
+        required: true
+    },
+    createdBy: {
+        type: String,
+        required: true
+    }
+});
+
+
+const Transaction = mongoose.model("Transaction", TxSchema);
+
+
+// ---------------------------
+// JWT MIDDLEWARE
+// ---------------------------
+function auth(req, res, next) {
+    try {
+        const token = req.headers.authorization?.split(" ")[1];
+        if (!token) return res.status(401).json({ msg: "No token" });
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
+        next();
+
+    } catch (err) {
+        return res.status(401).json({ msg: "Invalid token" });
+    }
+}
+
+function admin(req, res, next) {
+    if (req.user.role !== "admin") {
+        return res.status(403).json({ msg: "Admin only" });
+    }
+    next();
+}
+
+
+// ---------------------------
+// ADMIN CREATE DEFAULT USER
+// ---------------------------
+async function seedAdmin() {
+    const exists = await User.findOne({ email: "golamfaruk680@gmail.com" });
+    if (!exists) {
+        const hash = await bcrypt.hash("Admin@123", 10);
+        await User.create({
+            name: "Sohag",
+            email: "golamfaruk680@gmail.com",
+            password: hash,
+            role: "admin",
+        });
+        console.log("Admin created: golamfaruk680@gmail.com / Admin@123");
+    }
+}
+seedAdmin();
+
+
+
+
+// ---------------------------
+// ROUTES
+// ---------------------------
+
+// send otp by nodemailer
+
+
+
+
+
+// otp verify
+app.post("/verify-otp", async (req, res) => {
+    const { email, otp } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(404).json({ msg: "User not found" });
+
+    if (Date.now() > user.otpExpiresAt) {
+        user.otp = null;
+        user.otpExpiresAt = null;
+        await user.save();
+        return res.status(400).json({ msg: "OTP expired" });
+    }
+
+    if (user.otp !== otp) {
+        return res.status(400).json({ msg: "Invalid OTP" });
+    }
+
+    user.isVerified = true;
+    user.otp = null;
+    user.otpExpiresAt = null;
+    await user.save();
+
+    res.json({ msg: "Verification successful! You can now login." });
+});
+
+
+
+
+// register user
+app.post("/register", async (req, res) => {
+
+
+    const { name, email, password } = req.body;
+    const exists = await User.findOne({ email });
+    if (exists) return res.status(400).json({ msg: "User already exists" });
+
+    const hashed = await bcrypt.hash(password, 10);
+
+    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+    const otpExpiresAt = Date.now() + 15000;
+
+    await User.create({
+        name,
+        email,
+        password: hashed,
+        isVerified: false,
+        otp,
+        otpExpiresAt
+    });
+
+    res.cookie("user-email", email, {
+        httpOnly: true,
+        secure: false,      // production e TRUE korba
+        sameSite: "strict",
+        path: "/",
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    });
+
+
+
+
+    const mailResult = await sendOtpEmail(email, otp);
+
+
+    res.json({ msg: "OTP sent to email" });
+});
+
+
+
+// login user
+app.post("/login", async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        const user = await User.findOne({ email });
+        if (!user) return res.status(400).json({ msg: "Invalid email or password" });
+
+        const ok = await bcrypt.compare(password, user.password);
+        if (!ok) return res.status(400).json({ msg: "Invalid email or password" });
+
+        // -------------------------
+        // CREATE ACCESS + REFRESH TOKEN
+        // -------------------------
+        const accessToken = jwt.sign(
+            { id: user._id, email: user.email, role: user.role },
+            process.env.ACCESS_TOKEN_SECRET,
+            { expiresIn: "15m" }
+        );
+
+        const refreshToken = jwt.sign(
+            { id: user._id },
+            process.env.REFRESH_TOKEN_SECRET,
+            { expiresIn: "7d" }
+        );
+
+        // -------------------------
+        // SET REFRESH TOKEN IN COOKIE
+        // -------------------------
+        res.cookie("refreshToken", refreshToken, {
+            httpOnly: true,
+            secure: false,      // production e TRUE korba
+            sameSite: "strict",
+            path: "/",
+            maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+        });
+
+        // -------------------------
+        // SEND ACCESS TOKEN
+        // -------------------------
+        res.json({ accessToken });
+
+    } catch (err) {
+        res.status(500).json({ msg: "Error" });
+    }
+});
+
+// LOGOUT USER
+app.post("/logout", (req, res) => {
+    res.clearCookie("refreshToken");
+    res.json({ msg: "Logged out" });
+})
+
+
+
+// admin add transaction
+app.post("/transaction", auth, admin, async (req, res) => {
+    try {
+        const { amount, date, sender, receiver } = req.body;
+
+        const txYear = date ? new Date(date).getFullYear() : new Date().getFullYear();
+
+        const tx = await Transaction.create({
+            amount,
+            date,
+            sender,
+            receiver,
+            year: txYear,
+            createdBy: req.user.email,
+        });
+
+        res.json(tx);
+
+    } catch (err) {
+        res.status(500).json({ msg: "Error" });
+    }
+});
+
+
+
+// admin view all transactions
+app.get("/transaction", auth, admin, async (req, res) => {
+    const list = await Transaction.find({});
+    res.json(list);
+});
+
+
+
+// 
+app.get('/', (req, res) => {
+    res.send(`  server running port ${process.env.PORT} `)
+})
+
+// ---------------------------
+// START SERVER
+// ---------------------------
+app.listen(5000, () => console.log("Server running on 5000"));
