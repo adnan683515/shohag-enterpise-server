@@ -22,18 +22,14 @@ app.use(cookieParser());
 app.use(express.json());
 app.use(cors());
 
-// ---------------------------
 // MONGODB CONNECT
-// ---------------------------
 mongoose
     .connect(process.env.DB_URL)
     .then(() => console.log("DB Connected"))
     .catch((err) => console.log("DB Error", err));
 
 
-// ---------------------------
 // USER MODEL
-// ---------------------------
 const UserSchema = new mongoose.Schema({
     name: String,
     email: String,
@@ -48,9 +44,8 @@ const UserSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", UserSchema);
 
-// ---------------------------
+
 // TRANSACTION MODEL
-// ---------------------------
 const TxSchema = new mongoose.Schema({
     amount: {
         type: Number,
@@ -167,6 +162,44 @@ app.post("/verify-otp", async (req, res) => {
 });
 
 
+// resend otp
+app.post('/resendOtp', async (req, res) => {
+    try {
+        const email = req.cookies.userEmail;
+        if (!email) {
+            return res.status(400).json({ message: "Email not found in cookies" });
+        }
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(404).json({ message: "User not found" });
+        }
+        // Generate new OTP (4 digits)
+        const newOtp = Math.floor(1000 + Math.random() * 9000).toString();
+        // Set OTP expiry (2 minutes example)
+        user.otp = newOtp;
+        user.otpExpiresAt = new Date(Date.now() + 2 * 60 * 1000);
+        await user.save();
+        console.log("Updated User OTP:", newOtp);
+
+
+        await sendOtpEmail(email, newOtp);
+
+        res.status(200).json({
+            success: true,
+            message: "New OTP has been sent!",
+            email,
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({
+            success: false,
+            message: "Something went wrong",
+            error: error.message,
+        });
+    }
+});
+
 
 
 // register user
@@ -191,7 +224,7 @@ app.post("/register", async (req, res) => {
         otpExpiresAt
     });
 
-    res.cookie("user-email", email, {
+    res.cookie("userEmail", email, {
         httpOnly: true,
         secure: false,      // production e TRUE korba
         sameSite: "strict",
@@ -221,9 +254,16 @@ app.post("/login", async (req, res) => {
         const ok = await bcrypt.compare(password, user.password);
         if (!ok) return res.status(400).json({ msg: "Invalid email or password" });
 
-        // -------------------------
+        // If email NOT verified — Stop Login
+        if (!user.isVerified) {
+            return res.status(401).json({
+                msg: "Please verify your email before login!",
+                status: "not_verified",
+                email: user.email
+            });
+        }
+
         // CREATE ACCESS + REFRESH TOKEN
-        // -------------------------
         const accessToken = jwt.sign(
             { id: user._id, email: user.email, role: user.role },
             process.env.ACCESS_TOKEN_SECRET,
@@ -236,24 +276,24 @@ app.post("/login", async (req, res) => {
             { expiresIn: "7d" }
         );
 
-        // -------------------------
+
         // SET REFRESH TOKEN IN COOKIE
-        // -------------------------
         res.cookie("refreshToken", refreshToken, {
             httpOnly: true,
-            secure: false,      // production e TRUE korba
+            secure: false,       // Production = true
             sameSite: "strict",
-            path: "/",
-            maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+            maxAge: 7 * 24 * 60 * 60 * 1000
         });
 
-        // -------------------------
         // SEND ACCESS TOKEN
-        // -------------------------
-        res.json({ accessToken });
+        res.json({
+            msg: "Login success",
+            accessToken
+        });
 
     } catch (err) {
-        res.status(500).json({ msg: "Error" });
+        console.error(err);
+        res.status(500).json({ msg: "Server error" });
     }
 });
 
