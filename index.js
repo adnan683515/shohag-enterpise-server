@@ -1,7 +1,3 @@
-// ---------------------------
-// ONE FILE BACKEND SYSTEM
-// Node + Express + MongoDB + JWT + Admin
-// ---------------------------
 
 require("dotenv").config();
 const express = require("express");
@@ -12,15 +8,14 @@ const cookieParser = require("cookie-parser");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
 const sendOtpEmail = require("./sendOtp.js");
-
-
-
+const { z } = require("zod");
 
 
 const app = express();
 app.use(cookieParser());
 app.use(express.json());
 app.use(cors());
+
 
 // MONGODB CONNECT
 mongoose
@@ -29,7 +24,20 @@ mongoose
     .catch((err) => console.log("DB Error", err));
 
 
-// USER MODEL
+// transection zod
+const transactionMongooseSchema = new mongoose.Schema({
+    amount: { type: Number, required: true },
+    date: { type: Date, default: Date.now },
+    year: { type: Number, default: () => new Date().getFullYear() },
+    sender: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    receiver: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+}, { timestamps: true });
+
+
+const Transaction = mongoose.model("Transaction", transactionMongooseSchema);
+
+
 const UserSchema = new mongoose.Schema({
     name: String,
     email: String,
@@ -42,46 +50,11 @@ const UserSchema = new mongoose.Schema({
 
 });
 
+// USER MODEL
 const User = mongoose.model("User", UserSchema);
 
 
-// TRANSACTION MODEL
-const TxSchema = new mongoose.Schema({
-    amount: {
-        type: Number,
-        required: true
-    },
-    date: {
-        type: Date,
-        default: Date.now   // auto today date
-    },
-
-    year: {
-        type: Number,
-        default: () => new Date().getFullYear()  // auto year
-    },
-    sender: {
-        type: String,
-        required: true
-    },
-
-    receiver: {
-        type: String,
-        required: true
-    },
-    createdBy: {
-        type: String,
-        required: true
-    }
-});
-
-
-const Transaction = mongoose.model("Transaction", TxSchema);
-
-
-// ---------------------------
 // JWT MIDDLEWARE
-// ---------------------------
 function auth(req, res, next) {
     try {
         const token = req.headers.authorization?.split(" ")[1];
@@ -96,6 +69,8 @@ function auth(req, res, next) {
     }
 }
 
+
+// admin
 function admin(req, res, next) {
     if (req.user.role !== "admin") {
         return res.status(403).json({ msg: "Admin only" });
@@ -104,9 +79,7 @@ function admin(req, res, next) {
 }
 
 
-// ---------------------------
 // ADMIN CREATE DEFAULT USER
-// ---------------------------
 async function seedAdmin() {
     const exists = await User.findOne({ email: "golamfaruk680@gmail.com" });
     if (!exists) {
@@ -120,19 +93,8 @@ async function seedAdmin() {
         console.log("Admin created: golamfaruk680@gmail.com / Admin@123");
     }
 }
+
 seedAdmin();
-
-
-
-
-// ---------------------------
-// ROUTES
-// ---------------------------
-
-// send otp by nodemailer
-
-
-
 
 
 // otp verify
@@ -201,7 +163,6 @@ app.post('/resendOtp', async (req, res) => {
 });
 
 
-
 // register user
 app.post("/register", async (req, res) => {
 
@@ -240,7 +201,6 @@ app.post("/register", async (req, res) => {
 
     res.json({ msg: "OTP sent to email" });
 });
-
 
 
 // login user
@@ -297,6 +257,7 @@ app.post("/login", async (req, res) => {
     }
 });
 
+
 // LOGOUT USER
 app.post("/logout", (req, res) => {
     res.clearCookie("refreshToken");
@@ -304,30 +265,33 @@ app.post("/logout", (req, res) => {
 })
 
 
-
 // admin add transaction
 app.post("/transaction", auth, admin, async (req, res) => {
     try {
-        const { amount, date, sender, receiver } = req.body;
+        const parsed = transactionZodSchema.safeParse(req.body);
 
-        const txYear = date ? new Date(date).getFullYear() : new Date().getFullYear();
+        if (!parsed.success) {
+            return res.status(400).json({ errors: parsed.error.errors });
+        }
+
+        const { amount, date, sender, receiver } = parsed.data;
+        const txDate = date ? new Date(date) : new Date();
 
         const tx = await Transaction.create({
             amount,
-            date,
+            date: txDate,
+            year: txDate.getFullYear(),
             sender,
             receiver,
-            year: txYear,
-            createdBy: req.user.email,
+            createdBy: req.user._id,
         });
 
         res.json(tx);
-
     } catch (err) {
-        res.status(500).json({ msg: "Error" });
+        console.error(err);
+        res.status(500).json({ msg: "Server Error" });
     }
 });
-
 
 
 // admin view all transactions
@@ -337,13 +301,8 @@ app.get("/transaction", auth, admin, async (req, res) => {
 });
 
 
-
-// 
 app.get('/', (req, res) => {
     res.send(`  server running port ${process.env.PORT} `)
 })
 
-// ---------------------------
-// START SERVER
-// ---------------------------
 app.listen(5000, () => console.log("Server running on 5000"));
