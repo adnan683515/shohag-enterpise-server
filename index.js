@@ -24,18 +24,49 @@ mongoose
     .catch((err) => console.log("DB Error", err));
 
 
-// transection zod
 const transactionMongooseSchema = new mongoose.Schema({
     amount: { type: Number, required: true },
     date: { type: Date, default: Date.now },
-    year: { type: Number, default: () => new Date().getFullYear() },
     sender: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     receiver: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-}, { timestamps: true });
+}, {
+    timestamps: true, // still needed to auto-set createdAt/updatedAt internally
+    toJSON: {
+        virtuals: true,
+        transform: (doc, ret) => {
+            // Format createdAt
+            if (ret.createdAt) {
+                const d = new Date(ret.createdAt);
+                const date = d.toISOString().split("T")[0];
+                let hours = d.getHours();
+                const minutes = d.getMinutes().toString().padStart(2, "0");
+                const ampm = hours >= 12 ? "PM" : "AM";
+                hours = hours % 12 || 12;
+                ret.createdAtFormatted = `${date} , time: ${hours}:${minutes} ${ampm}`;
+            }
 
+            // Format updatedAt
+            if (ret.updatedAt) {
+                const d = new Date(ret.updatedAt);
+                const date = d.toISOString().split("T")[0];
+                let hours = d.getHours();
+                const minutes = d.getMinutes().toString().padStart(2, "0");
+                const ampm = hours >= 12 ? "PM" : "AM";
+                hours = hours % 12 || 12;
+                ret.updatedAtFormatted = `${date} , time: ${hours}:${minutes} ${ampm}`;
+            }
 
-const Transaction = mongoose.model("Transaction", transactionMongooseSchema);
+            // REMOVE the original timestamps from output
+            delete ret.createdAt;
+            delete ret.updatedAt;
+            delete ret.__v;
+
+            return ret;
+        }
+    }
+});
+
 
 
 const UserSchema = new mongoose.Schema({
@@ -46,28 +77,40 @@ const UserSchema = new mongoose.Schema({
     otp: { type: String, default: null },
     otpExpiresAt: { type: Date, default: null },
     isVerified: { type: Boolean, default: false }
-
-
 });
+
+
+function auth(req, res, next) {
+    try {
+        const token = req.headers.authorization?.split(" ")[1];
+
+        if (!token) return res.status(401).json({ msg: "No token" });
+
+        const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+
+        req.user = decoded;
+
+        next();
+
+    } catch (err) {
+
+        return res.status(401).json({ msg: "Invalid token kire" });
+    }
+}
+
+
+
+
+
+const Transaction = mongoose.model("Transaction", transactionMongooseSchema);
+
+
 
 // USER MODEL
 const User = mongoose.model("User", UserSchema);
 
 
-// JWT MIDDLEWARE
-function auth(req, res, next) {
-    try {
-        const token = req.headers.authorization?.split(" ")[1];
-        if (!token) return res.status(401).json({ msg: "No token" });
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded;
-        next();
-
-    } catch (err) {
-        return res.status(401).json({ msg: "Invalid token" });
-    }
-}
 
 
 // admin
@@ -89,12 +132,32 @@ async function seedAdmin() {
             email: "golamfaruk680@gmail.com",
             password: hash,
             role: "admin",
+            isVerified: true
         });
         console.log("Admin created: golamfaruk680@gmail.com / Admin@123");
     }
 }
 
 seedAdmin();
+
+
+
+// see all users
+app.get('/allUsers', auth, admin, async (req, res) => {
+    console.log("Users get")
+    try {
+        const users = await User.find({}).select("_id name role");
+        res.json({
+            count: users.length,
+            users
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ msg: "Server Error" });
+    }
+});
+
+
 
 
 // otp verify
@@ -139,7 +202,7 @@ app.post('/resendOtp', async (req, res) => {
         const newOtp = Math.floor(1000 + Math.random() * 9000).toString();
         // Set OTP expiry (2 minutes example)
         user.otp = newOtp;
-        user.otpExpiresAt = new Date(Date.now() + 2 * 60 * 1000);
+        user.otpExpiresAt = new Date(Date.now() + 1 * 60 * 1000);
         await user.save();
         console.log("Updated User OTP:", newOtp);
 
@@ -166,7 +229,6 @@ app.post('/resendOtp', async (req, res) => {
 // register user
 app.post("/register", async (req, res) => {
 
-
     const { name, email, password } = req.body;
     const exists = await User.findOne({ email });
     if (exists) return res.status(400).json({ msg: "User already exists" });
@@ -174,7 +236,7 @@ app.post("/register", async (req, res) => {
     const hashed = await bcrypt.hash(password, 10);
 
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
-    const otpExpiresAt = Date.now() + 15000;
+    const otpExpiresAt = Date.now() + 60000;
 
     await User.create({
         name,
@@ -209,6 +271,7 @@ app.post("/login", async (req, res) => {
         const { email, password } = req.body;
 
         const user = await User.findOne({ email });
+
         if (!user) return res.status(400).json({ msg: "Invalid email or password" });
 
         const ok = await bcrypt.compare(password, user.password);
@@ -227,7 +290,7 @@ app.post("/login", async (req, res) => {
         const accessToken = jwt.sign(
             { id: user._id, email: user.email, role: user.role },
             process.env.ACCESS_TOKEN_SECRET,
-            { expiresIn: "15m" }
+            { expiresIn: "1h" }
         );
 
         const refreshToken = jwt.sign(
@@ -245,6 +308,18 @@ app.post("/login", async (req, res) => {
             maxAge: 7 * 24 * 60 * 60 * 1000
         });
 
+
+
+        res.cookie("userEmail", email, {
+            httpOnly: true,
+            secure: false,      // production e TRUE korba
+            sameSite: "strict",
+            path: "/",
+            maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+        });
+
+
+
         // SEND ACCESS TOKEN
         res.json({
             msg: "Login success",
@@ -261,29 +336,40 @@ app.post("/login", async (req, res) => {
 // LOGOUT USER
 app.post("/logout", (req, res) => {
     res.clearCookie("refreshToken");
+    res.clearCookie('userEmail')
     res.json({ msg: "Logged out" });
 })
+
+
+const transactionZod = z.object({
+    amount: z.number().min(1, "Amount must be greater than 0"),
+    date: z.string().optional(), // optional string, you can parse it later to Date
+    sender: z.string().length(24, "Sender must be a valid MongoDB ObjectId"),
+    receiver: z.string().length(24, "Receiver must be a valid MongoDB ObjectId"),
+});
+
 
 
 // admin add transaction
 app.post("/transaction", auth, admin, async (req, res) => {
     try {
-        const parsed = transactionZodSchema.safeParse(req.body);
+
+        const parsed = transactionZod.safeParse(req.body)
 
         if (!parsed.success) {
             return res.status(400).json({ errors: parsed.error.errors });
         }
 
         const { amount, date, sender, receiver } = parsed.data;
+
         const txDate = date ? new Date(date) : new Date();
 
         const tx = await Transaction.create({
             amount,
             date: txDate,
-            year: txDate.getFullYear(),
             sender,
             receiver,
-            createdBy: req.user._id,
+            createdBy: req.user.id,
         });
 
         res.json(tx);
