@@ -10,19 +10,16 @@ const cors = require("cors");
 const sendOtpEmail = require("./sendOtp.js");
 const { z } = require("zod");
 
-
 const app = express();
 app.use(cookieParser());
 app.use(express.json());
 app.use(cors());
 
-
-// MONGODB CONNECT
+//MONGODB CONNECT
 mongoose
     .connect(process.env.DB_URL)
     .then(() => console.log("DB Connected"))
     .catch((err) => console.log("DB Error", err));
-
 
 const transactionMongooseSchema = new mongoose.Schema({
     amount: { type: Number, required: true },
@@ -67,8 +64,6 @@ const transactionMongooseSchema = new mongoose.Schema({
     }
 });
 
-
-
 const UserSchema = new mongoose.Schema({
     name: String,
     email: String,
@@ -78,7 +73,6 @@ const UserSchema = new mongoose.Schema({
     otpExpiresAt: { type: Date, default: null },
     isVerified: { type: Boolean, default: false }
 });
-
 
 function auth(req, res, next) {
     try {
@@ -98,29 +92,26 @@ function auth(req, res, next) {
     }
 }
 
-
-
-
-
 const Transaction = mongoose.model("Transaction", transactionMongooseSchema);
-
-
 
 // USER MODEL
 const User = mongoose.model("User", UserSchema);
 
-
-
-
-
-// admin
-function admin(req, res, next) {
-    if (req.user.role !== "admin") {
+// only admin
+function OnlyAdmin(req, res, next) {
+    if (req?.user?.role !== 'admin') {
         return res.status(403).json({ msg: "Admin only" });
     }
-    next();
+    next()
 }
 
+// admin or subadmin
+function adminOrSubadmin(req, res, next) {
+    if (req.user.role === "admin" || req.user.role === "subadmin") {
+        return next(); 
+    }
+    return res.status(403).json({ msg: "Access denied: Admin or Subadmin only" });
+}
 
 // ADMIN CREATE DEFAULT USER
 async function seedAdmin() {
@@ -137,13 +128,10 @@ async function seedAdmin() {
         console.log("Admin created: golamfaruk680@gmail.com / Admin@123");
     }
 }
-
 seedAdmin();
 
-
-
 // see all users
-app.get('/allUsers', auth, admin, async (req, res) => {
+app.get('/allUsers', auth, OnlyAdmin, async (req, res) => {
     console.log("Users get")
     try {
         const users = await User.find({}).select("_id name role");
@@ -156,9 +144,6 @@ app.get('/allUsers', auth, admin, async (req, res) => {
         res.status(500).json({ msg: "Server Error" });
     }
 });
-
-
-
 
 // otp verify
 app.post("/verify-otp", async (req, res) => {
@@ -185,7 +170,6 @@ app.post("/verify-otp", async (req, res) => {
 
     res.json({ msg: "Verification successful! You can now login." });
 });
-
 
 // resend otp
 app.post('/resendOtp', async (req, res) => {
@@ -225,7 +209,6 @@ app.post('/resendOtp', async (req, res) => {
     }
 });
 
-
 // register user
 app.post("/register", async (req, res) => {
 
@@ -263,7 +246,6 @@ app.post("/register", async (req, res) => {
 
     res.json({ msg: "OTP sent to email" });
 });
-
 
 // login user
 app.post("/login", async (req, res) => {
@@ -332,7 +314,6 @@ app.post("/login", async (req, res) => {
     }
 });
 
-
 // LOGOUT USER
 app.post("/logout", (req, res) => {
     res.clearCookie("refreshToken");
@@ -340,7 +321,7 @@ app.post("/logout", (req, res) => {
     res.json({ msg: "Logged out" });
 })
 
-
+// transection zod validation
 const transactionZod = z.object({
     amount: z.number().min(1, "Amount must be greater than 0"),
     date: z.string().optional(), // optional string, you can parse it later to Date
@@ -348,10 +329,8 @@ const transactionZod = z.object({
     receiver: z.string().length(24, "Receiver must be a valid MongoDB ObjectId"),
 });
 
-
-
 // admin add transaction
-app.post("/transaction", auth, admin, async (req, res) => {
+app.post("/transaction", auth, adminOrSubadmin, async (req, res) => {
     try {
 
         const parsed = transactionZod.safeParse(req.body)
@@ -379,16 +358,99 @@ app.post("/transaction", auth, admin, async (req, res) => {
     }
 });
 
+// Transaction Details
+app.get('/transectionDetails/:id', auth, async (req, res) => {
+    try {
+        const { id } = req.params;
 
-// admin view all transactions
-app.get("/transaction", auth, admin, async (req, res) => {
-    const list = await Transaction.find({});
-    res.json(list);
+        const tx = await Transaction.findById(id)
+            .populate("sender", "name email")
+            .populate("receiver", "name email");
+
+        if (!tx) {
+            return res.status(404).json({ msg: "Transaction not found" });
+        }
+
+        res.json(tx);
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ msg: "Server error" });
+    }
 });
 
+// edit transection only subadmin and adnmin
+app.put("/transaction/:id", auth, adminOrSubadmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { amount, date, sender, receiver } = req.body;
+
+        const updatedTx = await Transaction.findByIdAndUpdate(
+            id,
+            {
+                amount,
+                date,
+                sender,
+                receiver
+            },
+            { new: true, runValidators: true }
+        )
+            .populate("sender", "name email")
+            .populate("receiver", "name email");
+
+        if (!updatedTx) {
+            return res.status(404).json({ msg: "Transaction not found" });
+        }
+
+        res.json({
+            msg: "Transaction updated successfully",
+            transaction: updatedTx
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ msg: "Server error" });
+    }
+});
+
+app.get("/transaction", auth, async (req, res) => {
+    try {
+        const { user, sender, receiver } = req.query;
+        let query = {};
+        // Single user filter → sender OR receiver
+        if (user) {
+            query = {
+                $or: [
+                    { sender: user },
+                    { receiver: user }
+                ]
+            };
+        }
+
+        // If both sender & receiver filter provided → exact between 2 users
+        if (sender && receiver) {
+            query = {
+                $or: [
+                    { sender, receiver },
+                    { sender: receiver, receiver: sender }
+                ]
+            };
+        }
+
+        const list = await Transaction.find(query)
+            .populate("sender", "name email")
+            .populate("receiver", "name email")
+            .sort({ date: -1 });
+
+        return res.json(list);
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ msg: "Server error" });
+    }
+});
 
 app.get('/', (req, res) => {
-    res.send(`  server running port ${process.env.PORT} `)
+    res.send(`server running port ${process.env.PORT} `)
 })
-
 app.listen(5000, () => console.log("Server running on 5000"));
